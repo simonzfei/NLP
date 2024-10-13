@@ -4,31 +4,27 @@
 @Auth ： simonzfei
 @File ：finetune.py
 @IDE ：PyCharm
-@Motto：thinking coding 
+@Motto：thinking coding
 """
+import torch
 from datasets import load_dataset
-from transformers import GPT2Tokenizer
-
-
-from transformers import GPT2LMHeadModel, Trainer, TrainingArguments
-
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, Trainer, TrainingArguments
+from torch.nn import CrossEntropyLoss
 
 # Load the dataset
 dataset = load_dataset("wikitext", "wikitext-103-v1")
 
-# Check the structure of the dataset
-# print(dataset)
-
-#Tokenize the text for model input using GPT-2’s tokenizer:
 # Load the GPT-2 tokenizer
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
-# Tokenize the dataset
+# Add a pad token to the tokenizer
+tokenizer.pad_token = tokenizer.eos_token  # Use eos_token as pad_token
+
+# Tokenize the dataset with padding and truncation
 def tokenize_function(examples):
-    return tokenizer(examples["text"], return_special_tokens_mask=True)
+    return tokenizer(examples["text"], truncation=True, max_length=1024, padding="max_length")
 
 tokenized_datasets = dataset.map(tokenize_function, batched=True)
-
 
 # Load pre-trained GPT-2 model
 model = GPT2LMHeadModel.from_pretrained("gpt2")
@@ -43,8 +39,25 @@ training_args = TrainingArguments(
     logging_dir="./logs",
 )
 
-# Initialize Trainer
-trainer = Trainer(
+# Subclass Trainer and override compute_loss
+class CustomTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        outputs = model(**inputs)
+        logits = outputs.logits
+        labels = inputs["input_ids"]
+
+        # Shift the logits and labels for language modeling
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        # Flatten the tensors for CrossEntropyLoss
+        loss_fct = CrossEntropyLoss()
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
+
+# Initialize the custom Trainer
+trainer = CustomTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_datasets["train"],
@@ -54,14 +67,17 @@ trainer = Trainer(
 # Start fine-tuning
 trainer.train()
 
-
 # Save the model
 trainer.save_model("./fine_tuned_gpt2")
 
 # Evaluate the model on the validation set
 eval_results = trainer.evaluate()
-print(f"Perplexity: {eval_results['perplexity']}")
 
+# Calculate perplexity
+eval_loss = eval_results["eval_loss"]
+perplexity = torch.exp(torch.tensor(eval_loss))
+
+print(f"Perplexity: {perplexity.item()}")
 
 # Generate text from a prompt
 prompt = "Artificial intelligence is"
@@ -71,5 +87,3 @@ inputs = tokenizer(prompt, return_tensors="pt")
 output = model.generate(**inputs, max_length=100)
 generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
 print(generated_text)
-
-
